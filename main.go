@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 
 	"github.com/schollz/progressbar/v3"
 )
@@ -32,8 +33,17 @@ type golangOrgResp []struct {
 }
 
 func main() {
+	lg := log.New(os.Stderr, "glg:", 0)
 	execute := flag.Bool("execute", false, "actually download the file")
+	version := flag.Bool("version", false, "show version and exit")
 	flag.Parse()
+
+	if *version {
+		i, _ := debug.ReadBuildInfo()
+		lg.Printf(" Version\n%s", i)
+		os.Exit(0)
+	}
+
 	resp, err := http.Get(goURL)
 	if err != nil {
 		log.Fatal(err)
@@ -52,14 +62,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("%v a: %s o: %s\n", g[0].Version, runtime.GOARCH, runtime.GOOS)
+	lg.Printf("%v a: %s o: %s\n", g[0].Version, runtime.GOARCH, runtime.GOOS)
 
 	// https://dl.google.com/go/go1.14.linux-amd64.tar.gz
 	// find right one
 	for _, f := range g[0].Files {
 		if f.Arch == runtime.GOARCH && f.Os == runtime.GOOS {
 			fn := fmt.Sprintf("https://dl.google.com/go/%s", f.Filename)
-			fmt.Println("DL: ", fn)
+			lg.Println("DL: ", fn)
 			if *execute {
 				localFile := filepath.Join(os.TempDir(), f.Filename)
 				DownloadFile(localFile, fn)
