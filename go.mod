@@ -1,4 +1,4 @@
-module getlatestgo
+module github.com/dmlyons/getlatestgo
 
 go 1.14
 
