@@ -18,7 +18,10 @@ import (
 	"github.com/schollz/progressbar/v3"
 )
 
-const defaultURL = "https://golang.org/dl/?mode=json"
+const (
+	defaultURL    = "https://golang.org/dl/?mode=json"
+	downloadBase  = "https://dl.google.com/go/"
+)
 
 // GoRelease represents a single Go release from the API.
 type GoRelease struct {
@@ -195,7 +198,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	dlURL := fmt.Sprintf("https://dl.google.com/go/%s", f.Filename)
+	dlURL := downloadBase + f.Filename
 	lg.Println("URL:", dlURL)
 
 	if !*execute {
