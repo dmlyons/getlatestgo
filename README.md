@@ -22,3 +22,10 @@ getlatestgo -version           # show build version info
 | `-target`  | Download a specific Go version (e.g. `go1.22.5`) |
 | `-list`    | List all available stable releases |
 | `-version` | Show version and exit |
+
+## Code layout
+
+- `cli`: flag parsing and command orchestration
+- `releases`: Go release metadata parsing, lookup, and fetch logic
+- `download`: HTTP retry client, file download, and SHA256 verification
+- `install`: installation command execution
