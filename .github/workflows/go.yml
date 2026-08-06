@@ -7,19 +7,25 @@ on:
     branches: [ main ]
 
 jobs:
-
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [stable, oldstable]
+    name: Build and test (Go ${{ matrix.go-version }})
     steps:
     - uses: actions/checkout@v4
 
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: stable
+        go-version: ${{ matrix.go-version }}
 
     - name: Build
       run: go build -v ./...
 
     - name: Test
       run: go test -v ./...
+
+    - name: Vet
+      run: go vet ./...
