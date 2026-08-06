@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,13 +15,24 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
+	"time"
 
 	"github.com/schollz/progressbar/v3"
 )
 
 const (
-	defaultURL    = "https://golang.org/dl/?mode=json"
-	downloadBase  = "https://dl.google.com/go/"
+	defaultURL         = "https://golang.org/dl/?mode=json"
+	downloadBase       = "https://dl.google.com/go/"
+	requestTimeout     = 30 * time.Second
+	maxHTTPAttempts    = 3
+	retryBaseBackoff   = 300 * time.Millisecond
+	errorBodyMaxLength = 512
+)
+
+var (
+	httpClient = &http.Client{Timeout: requestTimeout}
+	retrySleep = time.Sleep
 )
 
 // GoRelease represents a single Go release from the API.
@@ -70,20 +82,20 @@ func FindFile(release *GoRelease, goos, goarch string) (*GoFile, error) {
 
 // FetchReleases retrieves the release list from the given URL.
 func FetchReleases(url string) ([]GoRelease, error) {
-	resp, err := http.Get(url)
+	resp, err := doGetWithRetry(url, "fetch releases")
 	if err != nil {
-		return nil, fmt.Errorf("fetching releases: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
+		return nil, fmt.Errorf("fetch releases: reading response: %w", err)
 	}
 
 	var releases []GoRelease
 	if err := json.Unmarshal(body, &releases); err != nil {
-		return nil, fmt.Errorf("parsing releases: %w", err)
+		return nil, fmt.Errorf("fetch releases: parsing releases: %w", err)
 	}
 	return releases, nil
 }
@@ -118,22 +130,97 @@ func VerifySHA256(path, expected string) error {
 }
 
 // DownloadFile downloads a URL to a local file path, showing a progress bar.
-func DownloadFile(filepath string, url string) error {
-	resp, err := http.Get(url)
+func DownloadFile(localPath string, url string) error {
+	resp, err := doGetWithRetry(url, "download file")
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	out, err := os.Create(filepath)
+	out, err := os.Create(localPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("download file: creating local file: %w", err)
 	}
 	defer out.Close()
 
 	bar := progressbar.DefaultBytes(resp.ContentLength, "downloading")
 	_, err = io.Copy(io.MultiWriter(out, bar), resp.Body)
-	return err
+	if err != nil {
+		return fmt.Errorf("download file: writing data: %w", err)
+	}
+	return nil
+}
+
+func doGetWithRetry(url, operation string) (*http.Response, error) {
+	var lastErr error
+
+	for attempt := 1; attempt <= maxHTTPAttempts; attempt++ {
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("%s: creating request: %w", operation, err)
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: request failed: %w", operation, err)
+		} else {
+			if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+				return resp, nil
+			}
+
+			statusErr := buildHTTPStatusError(operation, resp)
+			if !isRetryableStatus(resp.StatusCode) {
+				return nil, statusErr
+			}
+			lastErr = statusErr
+		}
+
+		if attempt < maxHTTPAttempts {
+			retrySleep(backoffForAttempt(attempt))
+		}
+	}
+
+	return nil, fmt.Errorf("%s: failed after %d attempts: %w", operation, maxHTTPAttempts, lastErr)
+}
+
+func buildHTTPStatusError(operation string, resp *http.Response) error {
+	bodyPreview := readErrorBodyPreview(resp.Body)
+	closeErr := resp.Body.Close()
+
+	base := fmt.Sprintf("%s: unexpected status %d %s", operation, resp.StatusCode, http.StatusText(resp.StatusCode))
+	if bodyPreview != "" {
+		base = fmt.Sprintf("%s: %s", base, bodyPreview)
+	}
+	if closeErr != nil {
+		base = fmt.Sprintf("%s (closing response body: %v)", base, closeErr)
+	}
+
+	return errors.New(base)
+}
+
+func readErrorBodyPreview(r io.Reader) string {
+	body, err := io.ReadAll(io.LimitReader(r, errorBodyMaxLength))
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(body))
+}
+
+func isRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func backoffForAttempt(attempt int) time.Duration {
+	if attempt < 1 {
+		return retryBaseBackoff
+	}
+	return retryBaseBackoff * time.Duration(1<<(attempt-1))
 }
 
 // InstallGo removes the existing Go installation and extracts the tarball.

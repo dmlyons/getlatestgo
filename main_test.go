@@ -3,10 +3,15 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 var sampleJSON = `[
@@ -192,5 +197,133 @@ func TestGoReleaseJSON_RoundTrip(t *testing.T) {
 	}
 	if parsed[0].Files[0].Sha256 != releases[0].Files[0].Sha256 {
 		t.Error("sha256 mismatch after round-trip")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func setHTTPTestHooks(t *testing.T, client *http.Client) {
+	t.Helper()
+
+	originalClient := httpClient
+	originalSleep := retrySleep
+
+	httpClient = client
+	retrySleep = func(time.Duration) {}
+
+	t.Cleanup(func() {
+		httpClient = originalClient
+		retrySleep = originalSleep
+	})
+}
+
+func TestFetchReleases_Non2xxStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	setHTTPTestHooks(t, server.Client())
+
+	_, err := FetchReleases(server.URL)
+	if err == nil {
+		t.Fatal("expected non-2xx status error")
+	}
+	if !strings.Contains(err.Error(), "unexpected status 404") {
+		t.Fatalf("expected 404 status in error, got: %v", err)
+	}
+}
+
+func TestDownloadFile_Non2xxStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	setHTTPTestHooks(t, server.Client())
+
+	out := filepath.Join(t.TempDir(), "go.tar.gz")
+	err := DownloadFile(out, server.URL)
+	if err == nil {
+		t.Fatal("expected non-2xx status error")
+	}
+	if !strings.Contains(err.Error(), "unexpected status 403") {
+		t.Fatalf("expected 403 status in error, got: %v", err)
+	}
+	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+		t.Fatalf("expected output file to not exist, stat error: %v", statErr)
+	}
+}
+
+func TestFetchReleases_RetryThenSuccess(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests < 3 {
+			http.Error(w, "try again", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleJSON))
+	}))
+	defer server.Close()
+
+	setHTTPTestHooks(t, server.Client())
+
+	releases, err := FetchReleases(server.URL)
+	if err != nil {
+		t.Fatalf("expected success after retries, got: %v", err)
+	}
+	if len(releases) == 0 {
+		t.Fatal("expected parsed releases")
+	}
+	if requests != 3 {
+		t.Fatalf("expected 3 attempts, got %d", requests)
+	}
+}
+
+func TestFetchReleases_RetryExhausted(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	setHTTPTestHooks(t, server.Client())
+
+	_, err := FetchReleases(server.URL)
+	if err == nil {
+		t.Fatal("expected retry exhaustion error")
+	}
+	if !strings.Contains(err.Error(), "failed after 3 attempts") {
+		t.Fatalf("expected retry exhaustion in error, got: %v", err)
+	}
+	if requests != 3 {
+		t.Fatalf("expected 3 attempts, got %d", requests)
+	}
+}
+
+func TestFetchReleases_TransportError(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial tcp: i/o timeout")
+		}),
+	}
+	setHTTPTestHooks(t, client)
+
+	_, err := FetchReleases("https://example.invalid/releases")
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if !strings.Contains(err.Error(), "request failed") {
+		t.Fatalf("expected request failure in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "failed after 3 attempts") {
+		t.Fatalf("expected retry exhaustion in error, got: %v", err)
 	}
 }
