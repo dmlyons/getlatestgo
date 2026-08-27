@@ -147,6 +147,30 @@ func VerifySHA256(path, expected string) error {
 	return nil
 }
 
+// EnsureFile ensures a SHA256-verified copy of the file at url exists at localPath.
+// If localPath already exists and matches expectedSha256, it is reused without
+// re-downloading. Otherwise the file is (re)downloaded and verified; on
+// verification failure of the freshly downloaded file, the corrupt file is removed.
+// The returned cached bool reports whether the existing local file was reused.
+func EnsureFile(client *RetryClient, localPath, url, expectedSha256 string) (cached bool, err error) {
+	if info, statErr := os.Stat(localPath); statErr == nil && !info.IsDir() {
+		if verifyErr := VerifySHA256(localPath, expectedSha256); verifyErr == nil {
+			return true, nil
+		}
+	}
+
+	if err := DownloadFile(client, localPath, url); err != nil {
+		return false, fmt.Errorf("download failed: %w", err)
+	}
+
+	if err := VerifySHA256(localPath, expectedSha256); err != nil {
+		os.Remove(localPath)
+		return false, fmt.Errorf("verification failed: %w", err)
+	}
+
+	return false, nil
+}
+
 func buildHTTPStatusError(operation string, resp *http.Response) error {
 	bodyPreview := readErrorBodyPreview(resp.Body)
 	closeErr := resp.Body.Close()

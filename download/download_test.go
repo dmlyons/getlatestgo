@@ -226,3 +226,93 @@ func TestDownloadFileCopyErrorCleansUpPartialFile(t *testing.T) {
 		t.Fatalf("expected partial output file to be removed, stat error: %v", statErr)
 	}
 }
+
+func TestEnsureFileReusesValidCachedFile(t *testing.T) {
+	content := []byte("cached go tarball contents")
+	h := sha256.Sum256(content)
+	expected := hex.EncodeToString(h[:])
+
+	path := filepath.Join(t.TempDir(), "go.tar.gz")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := testClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			t.Fatal("unexpected HTTP request")
+			return nil, nil
+		}),
+	})
+
+	cached, err := EnsureFile(client, path, "http://unused/x", expected)
+	if err != nil {
+		t.Fatalf("EnsureFile: %v", err)
+	}
+	if !cached {
+		t.Fatal("expected cached == true")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading file: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("expected content unchanged %q, got %q", content, got)
+	}
+}
+
+func TestEnsureFileRedownloadsWhenCachedFileInvalid(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "go.tar.gz")
+	if err := os.WriteFile(path, []byte("stale wrong bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const body = "the quick brown fox jumps over the lazy dog"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	h := sha256.Sum256([]byte(body))
+	expected := hex.EncodeToString(h[:])
+
+	client := testClient(server.Client())
+
+	cached, err := EnsureFile(client, path, server.URL, expected)
+	if err != nil {
+		t.Fatalf("EnsureFile: %v", err)
+	}
+	if cached {
+		t.Fatal("expected cached == false")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading file: %v", err)
+	}
+	if string(got) != body {
+		t.Fatalf("expected downloaded content %q, got %q", body, got)
+	}
+}
+
+func TestEnsureFileRemovesFileOnVerifyFailureNoCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "go.tar.gz")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("arbitrary content"))
+	}))
+	defer server.Close()
+
+	client := testClient(server.Client())
+
+	_, err := EnsureFile(client, path, server.URL, "0000000000000000000000000000000000000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("expected verification failure error")
+	}
+	if !strings.Contains(err.Error(), "verification failed") {
+		t.Fatalf("expected 'verification failed' in error, got: %v", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("expected file to be removed, stat error: %v", statErr)
+	}
+}

@@ -78,16 +78,15 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	localFile := filepath.Join(os.TempDir(), f.Filename)
-	if err := download.DownloadFile(client, localFile, dlURL); err != nil {
-		return fmt.Errorf("download failed: %w", err)
+	cached, err := download.EnsureFile(client, localFile, dlURL, f.Sha256)
+	if err != nil {
+		return err
 	}
-
-	lg.Println("verifying SHA256...")
-	if err := download.VerifySHA256(localFile, f.Sha256); err != nil {
-		os.Remove(localFile)
-		return fmt.Errorf("verification failed: %w", err)
+	if cached {
+		lg.Println("using cached local download (SHA256 OK)")
+	} else {
+		lg.Println("SHA256 OK")
 	}
-	lg.Println("SHA256 OK")
 
 	if *install {
 		lg.Println("installing...")

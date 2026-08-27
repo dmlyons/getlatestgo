@@ -13,20 +13,26 @@ Layered, unidirectional dependency flow, no circular imports, no goroutines/chan
 synchronous/sequential:
 
 ```
-main.go → cli.Run() → releases.Fetch/FindRelease/FindFile → download.DownloadFile/VerifySHA256 → install.InstallGo
+main.go → cli.Run() → releases.Fetch/FindRelease/FindFile → download.EnsureFile → install.InstallGo
                                     ↑                                    ↑
                                     └──────── both depend on ───────────┘
                                           download.RetryClient
 ```
 
 - `main.go` — thin entry point: `main()` calls `cli.Run(os.Args[1:], os.Stdout, os.Stderr)`, `log.Fatal`s on error. No logic here.
-- `cli.Run(args, stdout, stderr) error` — parses flags, builds a `download.NewRetryClient()`, fetches the release list via `releases.Fetch`, resolves the target release/file via `releases.FindRelease`/`releases.FindFile`, and (if `-execute`) downloads + verifies + optionally installs. Errors from lower layers bubble up wrapped with `fmt.Errorf("<context>: %w", err)` at every boundary; `Run` never calls `log.Fatal` itself (that's `main`'s job) — this keeps `Run` testable via injected `io.Writer`s.
+- `cli.Run(args, stdout, stderr) error` — parses flags, builds a `download.NewRetryClient()`, fetches the release list via `releases.Fetch`, resolves the target release/file via `releases.FindRelease`/`releases.FindFile`, and (if `-execute`) calls `download.EnsureFile` (reuses a SHA256-verified local file if one already exists at the target path, otherwise downloads + verifies) + optionally installs. Errors from lower layers bubble up wrapped with `fmt.Errorf("<context>: %w", err)` at every boundary; `Run` never calls `log.Fatal` itself (that's `main`'s job) — this keeps `Run` testable via injected `io.Writer`s.
 - `releases` package — domain layer: parses the `golang.org/dl` JSON schema (`GoRelease`, `GoFile`), picks the right release/file. Depends on `download` only for its `*RetryClient` type (to fetch the JSON feed).
-- `download` package — transport layer: `RetryClient` (injectable `HTTPClient`, `MaxAttempts`, `BackoffBase`, `RetrySleep`), `GetWithRetry`, `DownloadFile` (streams with a progress bar via `schollz/progressbar/v3`), `VerifySHA256`. Zero dependency on other internal packages — leaf of the domain graph.
+- `download` package — transport layer: `RetryClient` (injectable `HTTPClient`, `MaxAttempts`, `BackoffBase`, `RetrySleep`), `GetWithRetry`, `DownloadFile` (streams with a progress bar via `schollz/progressbar/v3`), `VerifySHA256`, `EnsureFile` (checks for an existing local file matching the expected SHA256 before falling back to `DownloadFile`+verify, removing the file on post-download verification failure). Zero dependency on other internal packages — leaf of the domain graph.
 - `install` package — leaf package, shells out via `os/exec`: `sudo -n rm -rf /usr/local/go` then `sudo -n tar -C /usr/local -xzf <tarball>`. No internal deps.
 
 Dry-run behavior: without `-execute`, `cli.Run` only resolves and prints the download URL, it never
 downloads. `-install` implies `-execute`.
+
+Local cache reuse: `localFile := filepath.Join(os.TempDir(), f.Filename)` encodes version/os/arch in
+its name, so `download.EnsureFile` checks that path first — if it already exists and its SHA256
+matches the feed's `f.Sha256`, it's reused and `cli.Run` logs `"using cached local download (SHA256
+OK)"` instead of re-downloading. A mismatch (or no file) falls back to `DownloadFile` + verify, with
+the file removed on post-download verification failure.
 
 ## Key Directories
 
@@ -105,7 +111,8 @@ gh pr create --fill
 - `releases/releases.go` — `DefaultURL = "https://golang.org/dl/?mode=json"`, `Parse`, `Fetch`,
   `FindRelease`, `FindFile`.
 - `download/download.go` — `RetryClient`, `NewRetryClient`, `GetWithRetry`, `DownloadFile`,
-  `VerifySHA256`; `downloadBase = "https://dl.google.com/go/"` lives in `cli/run.go`.
+  `VerifySHA256`, `EnsureFile` (cache-aware wrapper combining the two); `downloadBase =
+  "https://dl.google.com/go/"` lives in `cli/run.go`.
 - `install/install.go` — `InstallGo(tarball string) error`.
 - `go.mod` — module `github.com/dmlyons/getlatestgo`, Go 1.25.0; one direct dependency
   (`schollz/progressbar/v3`).
