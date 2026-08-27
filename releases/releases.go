@@ -59,7 +59,12 @@ func FindRelease(releaseList []GoRelease, version string) (*GoRelease, error) {
 		return nil, fmt.Errorf("no releases found")
 	}
 	if version == "" {
-		return &releaseList[0], nil
+		for i := range releaseList {
+			if releaseList[i].Stable {
+				return &releaseList[i], nil
+			}
+		}
+		return nil, fmt.Errorf("no stable releases found")
 	}
 
 	for i := range releaseList {
