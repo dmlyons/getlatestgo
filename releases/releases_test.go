@@ -77,6 +77,34 @@ func TestFindReleaseLatest(t *testing.T) {
 	}
 }
 
+func TestFindReleaseLatestSkipsUnstable(t *testing.T) {
+	releaseList, err := Parse([]byte(`[
+  {"version": "go1.23rc1", "stable": false, "files": []},
+  {"version": "go1.22.5", "stable": true, "files": []},
+  {"version": "go1.22.4", "stable": true, "files": []}
+]`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	r, err := FindRelease(releaseList, "")
+	if err != nil {
+		t.Fatalf("FindRelease: %v", err)
+	}
+	if r.Version != "go1.22.5" {
+		t.Errorf("expected go1.22.5, got %s", r.Version)
+	}
+}
+
+func TestFindReleaseLatestNoStable(t *testing.T) {
+	releaseList, err := Parse([]byte(`[{"version": "go1.23rc1", "stable": false, "files": []}]`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := FindRelease(releaseList, ""); err == nil {
+		t.Fatal("expected error when no stable releases exist")
+	}
+}
+
 func TestFindReleaseSpecific(t *testing.T) {
 	releaseList := mustParseReleases(t)
 	r, err := FindRelease(releaseList, "go1.22.4")
