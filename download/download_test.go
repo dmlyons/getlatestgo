@@ -162,3 +162,67 @@ func TestDownloadFileNon2xxStatus(t *testing.T) {
 		t.Fatalf("expected output file to not exist, stat error: %v", statErr)
 	}
 }
+
+func TestDownloadFileSuccess(t *testing.T) {
+	const body = "the quick brown fox jumps over the lazy dog"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	client := testClient(server.Client())
+	out := filepath.Join(t.TempDir(), "go.tar.gz")
+
+	if err := DownloadFile(client, out, server.URL); err != nil {
+		t.Fatalf("DownloadFile: %v", err)
+	}
+
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("reading downloaded file: %v", err)
+	}
+	if string(got) != body {
+		t.Fatalf("expected downloaded content %q, got %q", body, got)
+	}
+}
+
+type failAfterReader struct {
+	remaining []byte
+	failErr   error
+}
+
+func (r *failAfterReader) Read(p []byte) (int, error) {
+	if len(r.remaining) == 0 {
+		return 0, r.failErr
+	}
+	n := copy(p, r.remaining)
+	r.remaining = r.remaining[n:]
+	return n, nil
+}
+
+func (r *failAfterReader) Close() error { return nil }
+
+func TestDownloadFileCopyErrorCleansUpPartialFile(t *testing.T) {
+	wantErr := errors.New("connection reset")
+	client := testClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       &failAfterReader{remaining: []byte("partial"), failErr: wantErr},
+				Header:     make(http.Header),
+			}, nil
+		}),
+	})
+	out := filepath.Join(t.TempDir(), "go.tar.gz")
+
+	err := DownloadFile(client, out, "http://example.invalid/go.tar.gz")
+	if err == nil {
+		t.Fatal("expected copy error")
+	}
+	if !strings.Contains(err.Error(), "writing data") {
+		t.Fatalf("expected 'writing data' in error, got: %v", err)
+	}
+	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+		t.Fatalf("expected partial output file to be removed, stat error: %v", statErr)
+	}
+}

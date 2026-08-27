@@ -84,6 +84,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 
 	lg.Println("verifying SHA256...")
 	if err := download.VerifySHA256(localFile, f.Sha256); err != nil {
+		os.Remove(localFile)
 		return fmt.Errorf("verification failed: %w", err)
 	}
 	lg.Println("SHA256 OK")
