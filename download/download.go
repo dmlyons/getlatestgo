@@ -110,11 +110,18 @@ func DownloadFile(client *RetryClient, localPath, url string) error {
 	if err != nil {
 		return fmt.Errorf("download file: creating local file: %w", err)
 	}
-	defer out.Close()
 
 	bar := progressbar.DefaultBytes(resp.ContentLength, "downloading")
-	if _, err := io.Copy(io.MultiWriter(out, bar), resp.Body); err != nil {
-		return fmt.Errorf("download file: writing data: %w", err)
+	_, copyErr := io.Copy(io.MultiWriter(out, bar), resp.Body)
+	closeErr := out.Close()
+
+	if copyErr != nil {
+		os.Remove(localPath)
+		return fmt.Errorf("download file: writing data: %w", copyErr)
+	}
+	if closeErr != nil {
+		os.Remove(localPath)
+		return fmt.Errorf("download file: closing local file: %w", closeErr)
 	}
 
 	return nil
