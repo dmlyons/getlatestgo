@@ -5,17 +5,26 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
-	"path/filepath"
 	"runtime"
 	"runtime/debug"
+
+	"github.com/schollz/progressbar/v3"
 
 	"github.com/dmlyons/getlatestgo/download"
 	installpkg "github.com/dmlyons/getlatestgo/install"
 	"github.com/dmlyons/getlatestgo/releases"
 )
 
-const downloadBase = "https://dl.google.com/go/"
+// terminalProgress renders download progress as a terminal progress bar.
+func terminalProgress() download.Progress {
+	var bar *progressbar.ProgressBar
+	return func(downloaded, total int64) {
+		if bar == nil {
+			bar = progressbar.DefaultBytes(total, "downloading")
+		}
+		_ = bar.Set64(downloaded)
+	}
+}
 
 func Run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("getlatestgo", flag.ContinueOnError)
@@ -45,10 +54,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	if *list {
-		for _, r := range releaseList {
-			if r.Stable {
-				fmt.Fprintln(stdout, r.Version)
-			}
+		for _, v := range releases.StableVersions(releaseList) {
+			fmt.Fprintln(stdout, v)
 		}
 		return nil
 	}
@@ -70,15 +77,15 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	dlURL := downloadBase + f.Filename
+	dlURL := f.DownloadURL()
 	lg.Println("URL:", dlURL)
 
 	if !*execute {
 		return nil
 	}
 
-	localFile := filepath.Join(os.TempDir(), f.Filename)
-	cached, err := download.EnsureFile(client, localFile, dlURL, f.Sha256)
+	localFile := f.LocalPath()
+	cached, err := download.EnsureFile(client, localFile, dlURL, f.Sha256, terminalProgress())
 	if err != nil {
 		return err
 	}

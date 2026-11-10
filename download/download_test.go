@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,7 +152,7 @@ func TestDownloadFileNon2xxStatus(t *testing.T) {
 	client := testClient(server.Client())
 	out := filepath.Join(t.TempDir(), "go.tar.gz")
 
-	err := DownloadFile(client, out, server.URL)
+	err := DownloadFile(client, out, server.URL, nil)
 	if err == nil {
 		t.Fatal("expected non-2xx status error")
 	}
@@ -173,7 +174,7 @@ func TestDownloadFileSuccess(t *testing.T) {
 	client := testClient(server.Client())
 	out := filepath.Join(t.TempDir(), "go.tar.gz")
 
-	if err := DownloadFile(client, out, server.URL); err != nil {
+	if err := DownloadFile(client, out, server.URL, nil); err != nil {
 		t.Fatalf("DownloadFile: %v", err)
 	}
 
@@ -183,6 +184,38 @@ func TestDownloadFileSuccess(t *testing.T) {
 	}
 	if string(got) != body {
 		t.Fatalf("expected downloaded content %q, got %q", body, got)
+	}
+}
+
+func TestDownloadFileReportsProgress(t *testing.T) {
+	body := strings.Repeat("x", 100_000)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	client := testClient(server.Client())
+	out := filepath.Join(t.TempDir(), "go.tar.gz")
+
+	var calls int
+	var lastDownloaded, lastTotal, prev int64
+	err := DownloadFile(client, out, server.URL, func(downloaded, total int64) {
+		if downloaded <= prev {
+			t.Errorf("progress not increasing: %d after %d", downloaded, prev)
+		}
+		prev = downloaded
+		calls++
+		lastDownloaded, lastTotal = downloaded, total
+	})
+	if err != nil {
+		t.Fatalf("DownloadFile: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("expected progress callbacks")
+	}
+	if lastDownloaded != int64(len(body)) || lastTotal != int64(len(body)) {
+		t.Fatalf("expected final progress %d/%d, got %d/%d", len(body), len(body), lastDownloaded, lastTotal)
 	}
 }
 
@@ -215,7 +248,7 @@ func TestDownloadFileCopyErrorCleansUpPartialFile(t *testing.T) {
 	})
 	out := filepath.Join(t.TempDir(), "go.tar.gz")
 
-	err := DownloadFile(client, out, "http://example.invalid/go.tar.gz")
+	err := DownloadFile(client, out, "http://example.invalid/go.tar.gz", nil)
 	if err == nil {
 		t.Fatal("expected copy error")
 	}
@@ -244,7 +277,7 @@ func TestEnsureFileReusesValidCachedFile(t *testing.T) {
 		}),
 	})
 
-	cached, err := EnsureFile(client, path, "http://unused/x", expected)
+	cached, err := EnsureFile(client, path, "http://unused/x", expected, nil)
 	if err != nil {
 		t.Fatalf("EnsureFile: %v", err)
 	}
@@ -278,7 +311,7 @@ func TestEnsureFileRedownloadsWhenCachedFileInvalid(t *testing.T) {
 
 	client := testClient(server.Client())
 
-	cached, err := EnsureFile(client, path, server.URL, expected)
+	cached, err := EnsureFile(client, path, server.URL, expected, nil)
 	if err != nil {
 		t.Fatalf("EnsureFile: %v", err)
 	}
@@ -305,7 +338,7 @@ func TestEnsureFileRemovesFileOnVerifyFailureNoCache(t *testing.T) {
 
 	client := testClient(server.Client())
 
-	_, err := EnsureFile(client, path, server.URL, "0000000000000000000000000000000000000000000000000000000000000000")
+	_, err := EnsureFile(client, path, server.URL, "0000000000000000000000000000000000000000000000000000000000000000", nil)
 	if err == nil {
 		t.Fatal("expected verification failure error")
 	}
