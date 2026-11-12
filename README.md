@@ -29,7 +29,17 @@ getlatestgo -version           # show build version info
 
 Installing asks for an administrator password through the desktop's own dialog (`pkexec` on Linux, the administrator prompt on macOS), so no terminal or `sudo -v` is needed. Install is unavailable on Windows; Download still works there.
 
-The GUI is a separate Go module in `gui/` so the CLI stays CGO-free. Building it needs a C compiler and, on Linux, the OpenGL/X11/Wayland headers:
+Release archives `getlatestgo-gui_<version>_linux_<arch>.tar.gz` (amd64, arm64) are attached to each GitHub release and listed in `checksums.txt` alongside the CLI. They need the usual desktop libraries at runtime (`libGL`, `libX11`, `libwayland-client`).
+
+The GUI is a separate Go module in `gui/` so the CLI stays CGO-free. The simplest way to build it is with Docker, which needs nothing else on the host; run from the repo root:
+
+```sh
+docker build -f gui/Dockerfile -o gui .   # writes gui/getlatestgo-gui for the host arch (Linux)
+```
+
+The first build takes a few minutes (cgo compiles the OpenGL/GLFW bindings); BuildKit cache mounts make rebuilds take seconds.
+
+To build natively instead you need a C compiler and, on Linux, the OpenGL/X11/Wayland headers:
 
 ```sh
 # Debian/Ubuntu/Mint

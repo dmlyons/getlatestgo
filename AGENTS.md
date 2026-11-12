@@ -43,7 +43,7 @@ share this path, so a file downloaded by one is reused by the other.
 | Path | Purpose |
 |---|---|
 | `cli/` | Flag parsing (`flag.NewFlagSet`), command orchestration, terminal progress bar (`run.go`) |
-| `gui/` | Fyne desktop app, separate Go module (`main.go`, `go.mod`, `icon.png` — the Go gopher, CC BY 4.0, embedded and set via `App.SetIcon`) |
+| `gui/` | Fyne desktop app, separate Go module (`main.go`, `go.mod`, `Dockerfile` — containerized cgo build used locally, in CI and for releases, `icon.png` — the Go gopher, CC BY 4.0, embedded and set via `App.SetIcon`) |
 | `releases/` | Go release metadata parsing, lookup (`FindRelease`/`FindFile`/`StableVersions`), download URL/local path, and fetch logic |
 | `download/` | HTTP retry client (`RetryClient`), file download with progress callback, SHA256 verification |
 | `install/` | Installs the downloaded tarball via `sudo` (CLI) or `pkexec`/`osascript` (GUI) |
@@ -68,19 +68,31 @@ go run . -install                # download, verify, and install (implies -execu
 go run . -version                # print build version info
 ```
 
-GUI (from `gui/`; needs a C compiler and on Debian/Ubuntu `gcc libgl1-mesa-dev xorg-dev
-libwayland-dev libxkbcommon-dev wayland-protocols`, the same packages the CI `gui` job installs):
+GUI via Docker (no host toolchain needed; run from the repo root because `gui/go.mod` replaces the
+root module with `../`). `gui/Dockerfile` builds on `golang:1.25-bookworm` with the Fyne headers,
+runs `go vet` + `go build`, and exports only the binary; BuildKit cache mounts make rebuilds take seconds:
+
+```sh
+docker build -f gui/Dockerfile -o gui .   # → gui/getlatestgo-gui (host arch, Linux)
+```
+
+GUI natively (from `gui/`; needs a C compiler and on Debian/Ubuntu `gcc libgl1-mesa-dev xorg-dev
+libwayland-dev libxkbcommon-dev wayland-protocols`, the same packages `gui/Dockerfile` installs):
 
 ```sh
 cd gui && go build -o getlatestgo-gui . && go vet ./...
 go run .                         # launch the GUI
 ```
 
-Releases are cut by pushing a `v*` tag (or manual `workflow_dispatch` with a `tag` input), which runs
-GoReleaser v2 (`.goreleaser.yml`): `go mod tidy` → cross-compile CGO-disabled binaries for
-linux/windows/darwin × amd64/arm64 → archive (`tar.gz`, `zip` on Windows) as
-`{ProjectName}_{Version}_{Os}_{Arch}` → `checksums.txt` → GitHub release. This covers the CLI only;
-the GUI is built and vetted in CI but not yet released. Changelog excludes commits
+Releases are cut by pushing a `v*` tag (or manual `workflow_dispatch` with a `tag` input). The
+release workflow first runs a `gui` job per arch on native runners (`ubuntu-latest` for amd64,
+`ubuntu-24.04-arm` for arm64): `gui/Dockerfile` → `getlatestgo-gui_{Version}_linux_{Arch}.tar.gz`
+(binary + `LICENSE` + `README.md`), uploaded as an artifact. The `goreleaser` job then downloads those
+into `dist-gui/` and runs GoReleaser v2 (`.goreleaser.yml`): `go mod tidy` → cross-compile
+CGO-disabled CLI binaries for linux/windows/darwin × amd64/arm64 → archive (`tar.gz`, `zip` on
+Windows) as `{ProjectName}_{Version}_{Os}_{Arch}` → `checksums.txt` (CLI archives plus `dist-gui/*`
+via `checksum.extra_files`) → GitHub release (GUI archives attached via `release.extra_files`). The
+GUI is Linux-only in releases. Changelog excludes commits
 prefixed `docs:` or `test:` — follow that convention in commit messages touching only docs/tests.
 
 ## Git Workflow
@@ -131,12 +143,14 @@ gh pr create --fill
 - `gui/main.go` — Fyne app (`app.NewWithID("io.github.dmlyons.getlatestgo")`).
 - `go.mod` — module `github.com/dmlyons/getlatestgo`, Go 1.25.0; one direct dependency
   (`schollz/progressbar/v3`). `gui/go.mod` adds `fyne.io/fyne/v2`.
-- `.goreleaser.yml`, `.github/workflows/go.yml`, `.github/workflows/release.yml` — CI/CD config.
+- `.goreleaser.yml`, `.github/workflows/go.yml`, `.github/workflows/release.yml`, `gui/Dockerfile`,
+  `.dockerignore` — CI/CD and build config.
 
 ## Runtime/Tooling Preferences
 
 - Go 1.25.0 (see `go.mod`); CI matrix tests the root module against `stable` and `oldstable` Go
-  versions, plus a separate `gui` job that builds and vets `gui/` on `stable`.
+  versions, plus a separate `gui` job that builds and vets `gui/` through `gui/Dockerfile`
+  (Buildx with the GitHub Actions layer cache, scope `gui-linux-amd64`, shared with the release job).
 - Standard `go` toolchain / module system — no other package manager.
 - Only direct third-party dependency of the root module: `github.com/schollz/progressbar/v3` (CLI
   progress bar during download). Everything else is stdlib. The GUI module adds `fyne.io/fyne/v2`.

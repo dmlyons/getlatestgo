@@ -15,13 +15,64 @@ permissions:
   contents: write
 
 jobs:
+  gui:
+    # Native runners per arch: the cgo build is too slow under QEMU emulation.
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    name: Build GUI (linux/${{ matrix.arch }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (gui/Dockerfile)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: gui/Dockerfile
+          outputs: type=local,dest=out
+          cache-from: type=gha,scope=gui-linux-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=gui-linux-${{ matrix.arch }}
+
+      - name: Package
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          # Same naming as the CLI archives ({ProjectName}_{Version}_{Os}_{Arch}).
+          mkdir -p dist-gui
+          cp LICENSE README.md out/
+          tar -czf "dist-gui/getlatestgo-gui_${TAG#v}_linux_${{ matrix.arch }}.tar.gz" \
+            -C out getlatestgo-gui LICENSE README.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-linux-${{ matrix.arch }}
+          path: dist-gui/*.tar.gz
+          if-no-files-found: error
+
   goreleaser:
+    needs: gui
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # Picked up by release.extra_files / checksum.extra_files in .goreleaser.yml.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gui-linux-*
+          path: dist-gui
+          merge-multiple: true
 
       - uses: actions/setup-go@v5
         with:

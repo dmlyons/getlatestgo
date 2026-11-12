@@ -32,24 +32,17 @@ jobs:
 
   gui:
     runs-on: ubuntu-latest
-    name: Build GUI (Fyne)
-    defaults:
-      run:
-        working-directory: gui
+    name: Build GUI (Fyne, Docker)
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
+    - uses: docker/setup-buildx-action@v3
+
+    - name: Build and vet (gui/Dockerfile)
+      uses: docker/build-push-action@v6
       with:
-        go-version: stable
-        cache-dependency-path: gui/go.sum
-
-    - name: Install Fyne build dependencies
-      run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev wayland-protocols
-
-    - name: Build
-      run: go build -v ./...
-
-    - name: Vet
-      run: go vet ./...
+        context: .
+        file: gui/Dockerfile
+        outputs: type=cacheonly
+        cache-from: type=gha,scope=gui-linux-amd64
+        cache-to: type=gha,mode=max,scope=gui-linux-amd64
