@@ -1,17 +1,24 @@
 # Repository Guidelines
 
-## Project Overview
+`getlatestgo` (module `github.com/dmlyons/getlatestgo`, Go 1.25.0) looks up the latest Go release
+for the host OS/arch from the `golang.org/dl` JSON feed, optionally downloads it with SHA256
+verification, and installs it to `/usr/local/go`. It ships as a CLI (root module) and a Fyne
+desktop GUI (separate module in `gui/`).
 
-`getlatestgo` is a small Go tool (module `github.com/dmlyons/getlatestgo`) that looks up the latest
-Go release for the host OS/arch from the official `golang.org/dl` JSON feed, optionally downloads
-it with SHA256 verification, and can install it to `/usr/local/go`. It ships as a CLI (root module)
-and a Fyne desktop GUI (separate module in `gui/`). Network requests use explicit timeouts and
-bounded retries for transient failures.
+Design details live next to the code. Read the relevant doc before changing a package, and update
+it when behavior changes. This file covers only repo-wide rules.
 
-## Architecture & Data Flow
+| Path | Docs | Role |
+|---|---|---|
+| `main.go` | — | Entry point: `cli.Run(os.Args[1:], os.Stdout, os.Stderr)`, `log.Fatal` on error; no logic |
+| `cli/` | `cli/doc.go` | Flags, orchestration, dry-run vs `-execute`/`-install`, terminal progress bar |
+| `releases/` | `releases/doc.go` | Feed schema, release/file lookup, download URL, local cache path |
+| `download/` | `download/doc.go` | Retry client (statuses, backoff, defaults), streaming download, SHA256, cache reuse |
+| `install/` | `install/doc.go` | `VERSION` parsing; install via `sudo -n` (CLI) or `pkexec`/`osascript` (GUI) |
+| `gui/` | `gui/README.md` | Fyne app, `fyne.Do` threading, `Dockerfile`, CI/release GUI jobs |
+| `README.md` | — | User docs, GUI build prerequisites, release pipeline (`## Releasing`) |
 
-Layered, unidirectional dependency flow, no circular imports. The core packages (`releases`,
-`download`, `install`) and the CLI are synchronous/sequential with no goroutines/channels:
+## Architecture
 
 ```
 main.go → cli.Run() ──┐
@@ -21,156 +28,70 @@ gui/main.go (Fyne) ───┘                    ↑                          
                                                 download.RetryClient
 ```
 
-- `main.go` — thin CLI entry point: `main()` calls `cli.Run(os.Args[1:], os.Stdout, os.Stderr)`, `log.Fatal`s on error. No logic here.
-- `gui/` — separate module `github.com/dmlyons/getlatestgo/gui` (`replace github.com/dmlyons/getlatestgo => ../`), single `main.go` building a Fyne window over the same `releases`/`download`/`install` calls. Kept out of the root module because Fyne needs CGO plus OpenGL/X11/Wayland headers; root `./...` never includes it (nested module), so the CLI stays CGO-free and goreleaser is unaffected. It is the only place with goroutines: blocking calls run off the UI goroutine and every widget update goes through `fyne.Do`.
-- `cli.Run(args, stdout, stderr) error` — parses flags, builds a `download.NewRetryClient()`, fetches the release list via `releases.Fetch`, resolves the target release/file via `releases.FindRelease`/`releases.FindFile`, and (if `-execute`) calls `download.EnsureFile` (reuses a SHA256-verified local file if one already exists at the target path, otherwise downloads + verifies) + optionally installs. Errors from lower layers bubble up wrapped with `fmt.Errorf("<context>: %w", err)` at every boundary; `Run` never calls `log.Fatal` itself (that's `main`'s job) — this keeps `Run` testable via injected `io.Writer`s.
-- `releases` package — domain layer: parses the `golang.org/dl` JSON schema (`GoRelease`, `GoFile`), picks the right release/file. Depends on `download` only for its `*RetryClient` type (to fetch the JSON feed).
-- `download` package — transport layer: `RetryClient` (injectable `HTTPClient`, `MaxAttempts`, `BackoffBase`, `RetrySleep`), `GetWithRetry`, `DownloadFile` (streams to disk, reporting through an optional `Progress func(downloaded, total int64)` callback — the CLI renders it with `schollz/progressbar/v3`, the GUI with a Fyne progress bar), `VerifySHA256`, `EnsureFile` (checks for an existing local file matching the expected SHA256 before falling back to `DownloadFile`+verify, removing the file on post-download verification failure). Zero dependency on other internal packages and no UI code — leaf of the domain graph.
-- `install` package — leaf package. `GoRoot = "/usr/local/go"`; `Installed(goroot) (*InstalledGo, error)` parses `<goroot>/VERSION` (version line + optional `time <RFC3339>` line; nil when absent) — the GUI shows it and compares against the newest stable via `go/version.Compare`. Shells out via `os/exec`: `InstallGo` (CLI): `sudo -n rm -rf /usr/local/go` then `sudo -n tar -C /usr/local -xzf <tarball>`. `InstallGoGraphical` (GUI): one privileged `rm && tar` via `pkexec /bin/sh -c` on Linux or `osascript ... with administrator privileges` on macOS (one auth prompt, no terminal); `GraphicalSupported()` is false elsewhere (Windows). No internal deps.
+- Dependencies flow one way with no cycles. `download` and `install` import no other internal
+  package; `releases` imports `download` only for `*RetryClient`; `cli` and `gui` sit on top.
+- No goroutines or channels outside `gui/`; core packages and the CLI are synchronous.
+- `gui/` is a nested module (`replace … => ../`), so root `./...` never builds it and the CLI stays
+  CGO-free.
+- CLI and GUI share one download cache (`GoFile.LocalPath` + `download.EnsureFile`).
+- Only third-party dependencies: `schollz/progressbar/v3` (root) and `fyne.io/fyne/v2` (`gui/`).
 
-Dry-run behavior: without `-execute`, `cli.Run` only resolves and prints the download URL, it never
-downloads. `-install` implies `-execute`.
+## Commands
 
-Local cache reuse: `GoFile.LocalPath()` (`filepath.Join(os.TempDir(), f.Filename)`) encodes
-version/os/arch in its name, so `download.EnsureFile` checks that path first — if it already exists
-and its SHA256 matches the feed's `f.Sha256`, it's reused and `cli.Run` logs `"using cached local
-download (SHA256 OK)"` instead of re-downloading. A mismatch (or no file) falls back to
-`DownloadFile` + verify, with the file removed on post-download verification failure. CLI and GUI
-share this path, so a file downloaded by one is reused by the other.
-
-## Key Directories
-
-| Path | Purpose |
-|---|---|
-| `cli/` | Flag parsing (`flag.NewFlagSet`), command orchestration, terminal progress bar (`run.go`) |
-| `gui/` | Fyne desktop app, separate Go module (`main.go`, `go.mod`, `Dockerfile` — containerized cgo build used locally, in CI and for releases, `icon.png` — the Go gopher, CC BY 4.0, embedded and set via `App.SetIcon`) |
-| `releases/` | Go release metadata parsing, lookup (`FindRelease`/`FindFile`/`StableVersions`), download URL/local path, and fetch logic |
-| `download/` | HTTP retry client (`RetryClient`), file download with progress callback, SHA256 verification |
-| `install/` | Installs the downloaded tarball via `sudo` (CLI) or `pkexec`/`osascript` (GUI) |
-
-## Development Commands
-
-No Makefile/shell scripts exist — plain `go` tooling only (mirrors `.github/workflows/go.yml`):
+Plain `go` tooling; no Makefile, no linter config. CI (`.github/workflows/go.yml`) runs the root
+module on Go `stable` and `oldstable`, and the GUI through `gui/Dockerfile`.
 
 ```sh
-go build -v ./...     # build
-go test -v ./...      # test
-go vet ./...          # vet (no separate linter configured)
+go build -v ./... && go test -v ./... && go vet ./...   # root module, as CI
+go run . -list                       # also: -target go1.22.5 (dry run), -execute, -install, -version
+docker build -f gui/Dockerfile -o gui .   # GUI → gui/getlatestgo-gui; run from repo root, no host toolchain
 ```
 
-Run locally:
+Native GUI builds need cgo and the Fyne headers; see `README.md` (`## GUI`).
 
-```sh
-go run . -list                 # list all available stable versions
-go run . -target go1.22.5      # dry-run: print the download URL for a specific version
-go run . -execute               # download + verify the latest release
-go run . -install                # download, verify, and install (implies -execute)
-go run . -version                # print build version info
-```
+## Releasing
 
-GUI via Docker (no host toolchain needed; run from the repo root because `gui/go.mod` replaces the
-root module with `../`). `gui/Dockerfile` builds on `golang:1.25-bookworm` with the Fyne headers,
-runs `go vet` + `go build`, and exports only the binary; BuildKit cache mounts make rebuilds take seconds:
-
-```sh
-docker build -f gui/Dockerfile -o gui .   # → gui/getlatestgo-gui (host arch, Linux)
-```
-
-GUI natively (from `gui/`; needs a C compiler and on Debian/Ubuntu `gcc libgl1-mesa-dev xorg-dev
-libwayland-dev libxkbcommon-dev wayland-protocols`, the same packages `gui/Dockerfile` installs):
-
-```sh
-cd gui && go build -o getlatestgo-gui . && go vet ./...
-go run .                         # launch the GUI
-```
-
-Releases are cut by pushing a `v*` tag (or manual `workflow_dispatch` with a `tag` input). The
-release workflow first runs a `gui` job per arch on native runners (`ubuntu-latest` for amd64,
-`ubuntu-24.04-arm` for arm64): `gui/Dockerfile` → `getlatestgo-gui_{Version}_linux_{Arch}.tar.gz`
-(binary + `LICENSE` + `README.md`), uploaded as an artifact. The `goreleaser` job then downloads those
-into `dist-gui/` and runs GoReleaser v2 (`.goreleaser.yml`): `go mod tidy` → cross-compile
-CGO-disabled CLI binaries for linux/windows/darwin × amd64/arm64 → archive (`tar.gz`, `zip` on
-Windows) as `{ProjectName}_{Version}_{Os}_{Arch}` → `checksums.txt` (CLI archives plus `dist-gui/*`
-via `checksum.extra_files`) → GitHub release (GUI archives attached via `release.extra_files`). The
-GUI is Linux-only in releases. Changelog excludes commits
-prefixed `docs:` or `test:` — follow that convention in commit messages touching only docs/tests.
+Push an annotated `v*` tag on `main` (semver: minor bump for features, patch for fixes). The release
+workflow builds Linux GUI archives, then GoReleaser builds the CLI archives and publishes both with
+one `checksums.txt`; details in `README.md` (`## Releasing`). The changelog skips `docs:`/`test:`
+commits, so use those prefixes for docs-only or test-only commits.
 
 ## Git Workflow
 
-All work happens on feature branches; `main` only receives changes via pull request (see the
-`dmlyons-*` branch/PR history for the existing convention). Never commit directly to `main`.
+Work on a feature branch; `main` changes only through pull requests, merged with a merge commit.
+Never commit directly to `main`. The repo is used with git worktrees: one sibling directory per
+branch (`main/` holds `main` and the shared `.git`). Give each new branch its own worktree and never
+switch branches inside an existing one.
 
 ```sh
-git checkout -b <branch-name> main
-# ...commit work...
-git push -u origin <branch-name>
-gh pr create --fill
+git fetch origin && git worktree add -b <branch> ../<branch> origin/main && cd ../<branch>
+git push -u origin <branch> && gh pr create --fill
+git worktree remove ../<branch> && git branch -D <branch>   # after the PR is merged
 ```
 
-## Code Conventions & Common Patterns
+In a worktree `.git` is a file pointing into `main/.git/worktrees/`; a container that needs git
+metadata (e.g. a GoReleaser snapshot) must also bind-mount `main/.git` at the same path.
 
-- **Error wrapping**: every error is wrapped with `fmt.Errorf("<context>: %w", err)` at each layer
-  boundary, building a breadcrumb chain (e.g. `"install failed: removing old go (run 'sudo -v' to
-  pre-authenticate): <output>: <exec error>"`). No panics except the top-level `log.Fatal` in `main`.
-- **Dependency injection for testability**: `cli.Run` takes explicit `stdout, stderr io.Writer`
-  instead of using globals; `download.RetryClient` exposes exported, test-overridable fields
-  (`HTTPClient`, `MaxAttempts`, `BackoffBase`, `RetrySleep`) instead of constructor options — tests
-  set `RetrySleep: func(time.Duration){}` to skip real backoff delays.
-- **Nil-safety**: `RetryClient.normalized()` is a private method handling nil receiver / nil-or-zero
-  fields, falling back to package defaults (`defaultMaxAttempts`, `defaultBackoffBase`, `time.Sleep`).
-- **Retry/backoff**: `isRetryableStatus` treats 408/425/429/500/502/503/504 as retryable;
-  `backoffForAttempt` is capped exponential backoff (`base * 2^(attempt-1)`).
-- **Naming**: exported Go-idiomatic PascalCase (`RetryClient`, `GoRelease`, `FindRelease`,
-  `DownloadFile`, `VerifySHA256`); unexported camelCase helpers (`normalized`,
-  `buildHTTPStatusError`, `isRetryableStatus`). Package names are short, lowercase, single words
-  matching their directory (`cli`, `install`, `releases`, `download`). The `install` package is
-  import-aliased as `installpkg` in `cli/run.go` and `gui/main.go` to avoid colliding with local
-  `install` variables.
-- **No concurrency in core/CLI**: single retry loop with real `time.Sleep`-based backoff; no
-  goroutines/channels outside `gui/`.
+## Code Conventions
 
-## Important Files
+- **Errors**: wrap at every layer boundary with `fmt.Errorf("<context>: %w", err)` to build a
+  breadcrumb chain. No panics; only `main` calls `log.Fatal`.
+- **Testability by injection**: `cli.Run` takes `stdout`/`stderr` writers instead of globals.
+  `download.RetryClient` exposes exported fields (`HTTPClient`, `MaxAttempts`, `BackoffBase`,
+  `RetrySleep`) rather than constructor options; nil or zero fields fall back to defaults.
+- **Naming**: Go-idiomatic exported PascalCase, unexported camelCase helpers. Package names are
+  short single lowercase words matching the directory. Import `install` as `installpkg`.
+- **Package docs**: design notes go in the package comment in `doc.go` (GUI: `gui/README.md`), not here.
 
-- `main.go` — entry point.
-- `cli/run.go` — flag definitions (`-execute`, `-install`, `-target`, `-list`, `-version`) and the
-  full orchestration flow.
-- `releases/releases.go` — `DefaultURL = "https://golang.org/dl/?mode=json"`, `DownloadBase =
-  "https://dl.google.com/go/"`, `Parse`, `Fetch`, `FindRelease`, `FindFile`, `StableVersions`,
-  `GoFile.DownloadURL`, `GoFile.LocalPath`.
-- `download/download.go` — `RetryClient`, `NewRetryClient`, `GetWithRetry`, `Progress`,
-  `DownloadFile`, `VerifySHA256`, `EnsureFile` (cache-aware wrapper combining the two).
-- `install/install.go` — `GoRoot`, `Installed`, `InstallGo`, `InstallGoGraphical`, `GraphicalSupported`.
-- `gui/main.go` — Fyne app (`app.NewWithID("io.github.dmlyons.getlatestgo")`).
-- `go.mod` — module `github.com/dmlyons/getlatestgo`, Go 1.25.0; one direct dependency
-  (`schollz/progressbar/v3`). `gui/go.mod` adds `fyne.io/fyne/v2`.
-- `.goreleaser.yml`, `.github/workflows/go.yml`, `.github/workflows/release.yml`, `gui/Dockerfile`,
-  `.dockerignore` — CI/CD and build config.
+## Testing
 
-## Runtime/Tooling Preferences
-
-- Go 1.25.0 (see `go.mod`); CI matrix tests the root module against `stable` and `oldstable` Go
-  versions, plus a separate `gui` job that builds and vets `gui/` through `gui/Dockerfile`
-  (Buildx with the GitHub Actions layer cache, scope `gui-linux-amd64`, shared with the release job).
-- Standard `go` toolchain / module system — no other package manager.
-- Only direct third-party dependency of the root module: `github.com/schollz/progressbar/v3` (CLI
-  progress bar during download). Everything else is stdlib. The GUI module adds `fyne.io/fyne/v2`.
-- No linter config (no `golangci-lint`, etc.) — CI relies on `go build`, `go test`, `go vet` only.
-
-## Testing & QA
-
-- Framework: stdlib `testing` only — no testify, no mocking libraries.
-- HTTP stubbing: `net/http/httptest.NewServer` with `http.HandlerFunc` closures (paired with
-  `defer server.Close()`) for realistic response simulation; a minimal inline `roundTripFunc`
-  (`http.RoundTripper` function adapter) in `download/download_test.go` for pure transport-level
-  errors (e.g. simulated dial timeouts).
-- Shared fixture/client helpers: `mustParseReleases(t)` in `releases/releases_test.go` and
-  `testClient(httpClient)` in `download/download_test.go`, both neutralizing `RetrySleep` so tests
-  run fast and deterministically.
-- Naming: `Test<FunctionName><Scenario>` (e.g. `TestFindReleaseNotFound`,
-  `TestGetWithRetryRetryExhausted`). Table-driven subtests via `t.Run` appear in
-  `releases_test.go`'s `TestFindFile` (iterating OS/arch combos); `download_test.go` uses one
-  top-level `Test` function per scenario instead.
-- Assertions: `t.Fatalf`/`t.Errorf` with `strings.Contains(err.Error(), "...")` checks — no sentinel
-  errors (`errors.Is`) compared, no assertion library.
-- Filesystem tests use `t.TempDir()` for isolation (SHA256 verification, download-failure cleanup).
-- Run all tests: `go test -v ./...`. No coverage threshold is enforced in CI.
+- Stdlib `testing` only: no testify, no mocking libraries, no coverage threshold.
+- HTTP: `httptest.NewServer` with `http.HandlerFunc` closures (`defer server.Close()`). For
+  transport-level errors such as dial timeouts, use the inline `roundTripFunc` adapter in
+  `download/download_test.go`.
+- Helpers: `mustParseReleases(t)` (`releases_test.go`) and `testClient(httpClient)`
+  (`download_test.go`). Both set a no-op `RetrySleep` so tests are fast and deterministic.
+- Names: `Test<FunctionName><Scenario>` (e.g. `TestFindReleaseNotFound`). Use table-driven `t.Run`
+  where inputs vary over a matrix (`TestFindFile`); otherwise write one test function per scenario.
+- Assertions: `t.Fatalf`/`t.Errorf` with `strings.Contains(err.Error(), "...")`. No sentinel errors.
+- Filesystem tests use `t.TempDir()`.
