@@ -55,8 +55,19 @@ The app icon is the Go gopher, designed by [Renée French](https://reneefrench.b
 
 ## Code layout
 
+Each package documents its design in a `doc.go` package comment (`go doc ./download`); the GUI module in [`gui/README.md`](gui/README.md).
+
 - `cli`: flag parsing and command orchestration (terminal progress bar)
 - `gui`: Fyne desktop app (separate module, uses the packages below)
 - `releases`: Go release metadata parsing, lookup, and fetch logic
 - `download`: HTTP retry client, file download with progress callback, and SHA256 verification
 - `install`: installation via `sudo` (CLI) or the desktop authentication dialog (GUI)
+
+## Releasing
+
+Push an annotated `v*` tag on `main` (or run the Release workflow manually with a `tag` input). `.github/workflows/release.yml` then:
+
+1. `gui` job, per arch on native runners: builds `gui/Dockerfile` and packages `getlatestgo-gui_{Version}_linux_{Arch}.tar.gz` (binary, `LICENSE`, `README.md`) as a workflow artifact.
+2. `goreleaser` job: downloads those archives into `dist-gui/` and runs GoReleaser v2 (`.goreleaser.yml`): `go mod tidy`, CGO-disabled CLI builds for linux/windows/darwin × amd64/arm64, archives named `{ProjectName}_{Version}_{Os}_{Arch}` (`tar.gz`, `zip` on Windows), one `checksums.txt` covering CLI and GUI archives (`checksum.extra_files`), and the GitHub release with the GUI archives attached (`release.extra_files`).
+
+The changelog skips commits prefixed `docs:` or `test:`.
