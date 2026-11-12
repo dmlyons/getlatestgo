@@ -59,13 +59,18 @@ commits, so use those prefixes for docs-only or test-only commits.
 ## Git Workflow
 
 Work on a feature branch; `main` changes only through pull requests, merged with a merge commit.
-Never commit directly to `main`.
+Never commit directly to `main`. The repo is used with git worktrees: one sibling directory per
+branch (`main/` holds `main` and the shared `.git`). Give each new branch its own worktree and never
+switch branches inside an existing one.
 
 ```sh
-git checkout -b <branch-name> main
-git push -u origin <branch-name>
-gh pr create --fill
+git fetch origin && git worktree add -b <branch> ../<branch> origin/main && cd ../<branch>
+git push -u origin <branch> && gh pr create --fill
+git worktree remove ../<branch> && git branch -D <branch>   # after the PR is merged
 ```
+
+In a worktree `.git` is a file pointing into `main/.git/worktrees/`; a container that needs git
+metadata (e.g. a GoReleaser snapshot) must also bind-mount `main/.git` at the same path.
 
 ## Code Conventions
 
