@@ -4,11 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/dmlyons/getlatestgo/download"
 )
 
-const DefaultURL = "https://golang.org/dl/?mode=json"
+const (
+	DefaultURL   = "https://golang.org/dl/?mode=json"
+	DownloadBase = "https://dl.google.com/go/"
+)
 
 type GoRelease struct {
 	Version string   `json:"version"`
@@ -24,6 +29,29 @@ type GoFile struct {
 	Sha256   string `json:"sha256"`
 	Size     int    `json:"size"`
 	Kind     string `json:"kind"`
+}
+
+// DownloadURL is the official download location of f.
+func (f *GoFile) DownloadURL() string {
+	return DownloadBase + f.Filename
+}
+
+// LocalPath is where f is downloaded to. The filename encodes version/os/arch,
+// so a verified file at this path can be reused as a cache across runs.
+func (f *GoFile) LocalPath() string {
+	return filepath.Join(os.TempDir(), f.Filename)
+}
+
+// StableVersions returns the versions of the stable releases, in feed order
+// (newest first).
+func StableVersions(releaseList []GoRelease) []string {
+	var versions []string
+	for _, r := range releaseList {
+		if r.Stable {
+			versions = append(versions, r.Version)
+		}
+	}
+	return versions
 }
 
 func Parse(data []byte) ([]GoRelease, error) {

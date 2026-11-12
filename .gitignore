@@ -15,4 +15,6 @@
 # vendor/
 
 dist/
+dist-gui/
 getlatestgo
+getlatestgo-gui

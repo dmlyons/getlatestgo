@@ -24,8 +24,16 @@ archives:
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
+# GUI archives are built by the `gui` job in .github/workflows/release.yml
+# (cgo + Fyne via gui/Dockerfile) and downloaded into dist-gui/ beforehand.
 checksum:
   name_template: 'checksums.txt'
+  extra_files:
+    - glob: ./dist-gui/*.tar.gz
+
+release:
+  extra_files:
+    - glob: ./dist-gui/*.tar.gz
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"

@@ -10,8 +10,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/schollz/progressbar/v3"
 )
 
 const (
@@ -99,7 +97,25 @@ func (c *RetryClient) normalized() (*http.Client, int, time.Duration, func(time.
 	return client, maxAttempts, backoffBase, sleepFn
 }
 
-func DownloadFile(client *RetryClient, localPath, url string) error {
+// Progress receives download progress after each chunk is written: the bytes
+// written so far and the expected total (-1 when the server sends no
+// Content-Length).
+type Progress func(downloaded, total int64)
+
+type progressWriter struct {
+	downloaded, total int64
+	report            Progress
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	w.downloaded += int64(len(p))
+	w.report(w.downloaded, w.total)
+	return len(p), nil
+}
+
+// DownloadFile streams url to localPath, removing the partial file on failure.
+// progress may be nil.
+func DownloadFile(client *RetryClient, localPath, url string, progress Progress) error {
 	resp, err := client.GetWithRetry(url, "download file")
 	if err != nil {
 		return err
@@ -111,8 +127,11 @@ func DownloadFile(client *RetryClient, localPath, url string) error {
 		return fmt.Errorf("download file: creating local file: %w", err)
 	}
 
-	bar := progressbar.DefaultBytes(resp.ContentLength, "downloading")
-	_, copyErr := io.Copy(io.MultiWriter(out, bar), resp.Body)
+	var dst io.Writer = out
+	if progress != nil {
+		dst = io.MultiWriter(out, &progressWriter{total: resp.ContentLength, report: progress})
+	}
+	_, copyErr := io.Copy(dst, resp.Body)
 	closeErr := out.Close()
 
 	if copyErr != nil {
@@ -151,15 +170,16 @@ func VerifySHA256(path, expected string) error {
 // If localPath already exists and matches expectedSha256, it is reused without
 // re-downloading. Otherwise the file is (re)downloaded and verified; on
 // verification failure of the freshly downloaded file, the corrupt file is removed.
+// progress (may be nil) is only called when a download happens.
 // The returned cached bool reports whether the existing local file was reused.
-func EnsureFile(client *RetryClient, localPath, url, expectedSha256 string) (cached bool, err error) {
+func EnsureFile(client *RetryClient, localPath, url, expectedSha256 string, progress Progress) (cached bool, err error) {
 	if info, statErr := os.Stat(localPath); statErr == nil && !info.IsDir() {
 		if verifyErr := VerifySHA256(localPath, expectedSha256); verifyErr == nil {
 			return true, nil
 		}
 	}
 
-	if err := DownloadFile(client, localPath, url); err != nil {
+	if err := DownloadFile(client, localPath, url, progress); err != nil {
 		return false, fmt.Errorf("download failed: %w", err)
 	}
 
