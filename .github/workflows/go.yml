@@ -14,10 +14,10 @@ jobs:
         go-version: [stable, oldstable]
     name: Build and test (Go ${{ matrix.go-version }})
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
         go-version: ${{ matrix.go-version }}
 
@@ -34,12 +34,12 @@ jobs:
     runs-on: ubuntu-latest
     name: Build GUI (Fyne, Docker)
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
-    - uses: docker/setup-buildx-action@v3
+    - uses: docker/setup-buildx-action@v4
 
     - name: Build and vet (gui/Dockerfile)
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: gui/Dockerfile

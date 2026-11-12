@@ -27,14 +27,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
     name: Build GUI (linux/${{ matrix.arch }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build (gui/Dockerfile)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: gui/Dockerfile
@@ -52,7 +52,7 @@ jobs:
           tar -czf "dist-gui/getlatestgo-gui_${TAG#v}_linux_${{ matrix.arch }}.tar.gz" \
             -C out getlatestgo-gui LICENSE README.md
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: gui-linux-${{ matrix.arch }}
           path: dist-gui/*.tar.gz
@@ -62,23 +62,23 @@ jobs:
     needs: gui
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       # Picked up by release.extra_files / checksum.extra_files in .goreleaser.yml.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: gui-linux-*
           path: dist-gui
           merge-multiple: true
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --clean
